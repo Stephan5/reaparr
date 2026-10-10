@@ -29,4 +29,4 @@ launchctl bootstrap "$domain" "$dest"
 
 echo "Reloaded $label"
 launchctl print "$domain/$label" | grep -E "state|pid" || true
-echo "Log: tail -f ~/Library/Logs/reaparr.log"
+echo "Log: tail -f ~/Library/Logs/$label.log"

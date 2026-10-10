@@ -44,18 +44,31 @@ security add-generic-password -a sonarr -s reaparr -w
 
 ## launchd
 
-Settings live in `reaparr.conf` (gitignored; one argument per line, see `reaparr.conf.example`). No terminal under launchd, so passwords/API keys must be in Keychain (above).
+Expects settings to live in `reaparr.conf` (see `reaparr.conf.example`). No terminal under launchd, so passwords/API keys must be in Keychain (above).
 
 ```
-cp reaparr.conf.example reaparr.conf    # first time, then edit
-./reload.sh                             # generate plist from template + conf, install, (re)load
-launchctl bootout gui/$(id -u)/io.github.stephan5.reaparr    # stop
-tail -f ~/Library/Logs/reaparr.log
+# start launch agent 
+# first run creates reaparr.conf to edit; then run again to generate the plist from template + conf, install, (re)load
+make install    
+              
+# stop and remove the launch agent  
+make uninstall
+
+# view logs
+tail -f ~/Library/Logs/io.github.stephan5.reaparr.log
 ```
 
-Run `./reload.sh` after changing `reaparr.conf` or `reaparr.py`. Add `--dry-run` to the conf to test first.
+Run `make install` after changing `reaparr.conf` or `reaparr.py`. Add `--dry-run` to the conf to test first.
 
 ## Notes
 
 - Magnet links are only checked once metadata arrives, so they may be partly downloaded before removal.
 - Auth failure exits; launchd `KeepAlive` will keep restarting it.
+
+## Tests
+
+Stdlib `unittest`, no network or Transmission needed:
+
+```
+make test
+```

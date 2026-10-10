@@ -15,8 +15,8 @@ __ARGS__
     <key>KeepAlive</key>
     <true/>
     <key>StandardOutPath</key>
-    <string>__HOME__/Library/Logs/reaparr.log</string>
+    <string>__HOME__/Library/Logs/__LABEL__.log</string>
     <key>StandardErrorPath</key>
-    <string>__HOME__/Library/Logs/reaparr.log</string>
+    <string>__HOME__/Library/Logs/__LABEL__.log</string>
 </dict>
 </plist>
