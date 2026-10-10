@@ -1,0 +1,9 @@
+# Copy to reaparr.conf and edit. One command-line argument per line
+# (see ./reaparr.py --help). Passwords and API keys belong in the Keychain,
+# not here; see README.
+--port
+9091
+--user
+YOUR_TRANSMISSION_USERNAME
+--sonarr-url
+http://localhost:8989

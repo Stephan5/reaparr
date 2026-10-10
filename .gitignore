@@ -1,0 +1,5 @@
+reaparr.conf
+__pycache__/
+*.pyc
+.idea/
+.DS_Store
