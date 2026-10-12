@@ -158,7 +158,7 @@ def sweep(client, sonarr, exts, delete_data, dry_run):
             record = queue.get(t["hashString"].upper())
         via = "; blocklisting in Sonarr" if record else ("; not in Sonarr queue" if sonarr else "")
         action = "WOULD REMOVE" if dry_run else "REMOVING"
-        log(f"{action}: {t['name']} ({len(hits)} match, e.g. {hits[0]}){via}")
+        log(f"{action}: {t['name']}{via}")
         if dry_run:
             continue
         if record:
