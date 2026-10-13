@@ -158,12 +158,18 @@ def sweep(client, sonarr, exts, delete_data, dry_run):
             record = queue.get(t["hashString"].upper())
         via = "; blocklisting in Sonarr" if record else ("; not in Sonarr queue" if sonarr else "")
         action = "WOULD REMOVE" if dry_run else "REMOVING"
-        log(f"{action}: {t['name']}{via}")
+        log(f"{action}: {t['name']} [{t['hashString']}]{via}")
         if dry_run:
             continue
         if record:
             sonarr.blocklist(record["id"])
         client.call("torrent-remove", {"ids": [t["id"]], "delete-local-data": delete_data})
+        # "success" only means the request was accepted; confirm it is gone.
+        left = client.call("torrent-get", {"ids": [t["id"]], "fields": ["id", "status", "errorString"]})["torrents"]
+        if left:
+            log(f"error: {t['name']} [{t['hashString']}] still in Transmission after removal "
+                f"(status {left[0].get('status')}, error {left[0].get('errorString') or 'none'!r})",
+                file=sys.stderr)
 
 
 def main():

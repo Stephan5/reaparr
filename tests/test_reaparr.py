@@ -186,13 +186,22 @@ class SweepTest(unittest.TestCase):
             {"id": 3, "name": "pack", "hashString": "cc33", "files": [{"name": "a.exe"}, {"name": "b.txt"}]},
         ]
         self.client = mock.Mock()
-        self.client.call.side_effect = lambda m, a=None: (
-            {"torrents": self.torrents} if m == "torrent-get" else {})
+        self.client.call.side_effect = self.fake_call
         self.removals = lambda: [c for c in self.client.call.call_args_list if c[0][0] == "torrent-remove"]
 
+    def fake_call(self, method, args=None):
+        """Transmission stand-in: torrent-remove really removes unless self.stuck."""
+        if method == "torrent-get":
+            ids = (args or {}).get("ids")
+            return {"torrents": [t for t in self.torrents if ids is None or t["id"] in ids]}
+        if method == "torrent-remove" and not getattr(self, "stuck", False):
+            self.torrents[:] = [t for t in self.torrents if t["id"] not in args["ids"]]
+        return {}
+
     def run_sweep(self, sonarr=None, delete_data=True, dry_run=False):
-        with mock.patch("reaparr.log"):
+        with mock.patch("reaparr.log") as log:
             reaparr.sweep(self.client, sonarr, EXTS, delete_data, dry_run)
+        self.log = log
 
     def test_removes_only_matching(self):
         self.run_sweep()
@@ -217,10 +226,27 @@ class SweepTest(unittest.TestCase):
         sonarr.queue_by_hash.return_value = {"AA11": {"id": 9}}
         sonarr.blocklist.side_effect = lambda i: order.append(("blocklist", i))
         self.client.call.side_effect = lambda m, a=None: (
-            {"torrents": self.torrents} if m == "torrent-get" else order.append((m, a)) or {})
+            order.append((m, a)) if m == "torrent-remove" else None) or self.fake_call(m, a)
         self.run_sweep(sonarr=sonarr)
         self.assertEqual(order[0], ("blocklist", 9))
         self.assertEqual(order[1][0], "torrent-remove")
+
+    def test_logs_hash_on_removal(self):
+        self.run_sweep()
+        self.assertIn("[aa11]", self.log.call_args_list[0][0][0])
+
+    def test_removal_verified_quietly_when_gone(self):
+        self.run_sweep()
+        self.assertEqual(len(self.log.call_args_list), 1)
+
+    def test_logs_error_when_torrent_survives_removal(self):
+        self.stuck = True
+        self.torrents[0]["status"] = 6
+        self.run_sweep()
+        msg = self.log.call_args_list[-1][0][0]
+        self.assertIn("still in Transmission", msg)
+        self.assertIn("aa11", msg)
+        self.assertEqual(self.log.call_args_list[-1][1], {"file": sys.stderr})
 
     def test_not_in_sonarr_queue_still_removed(self):
         sonarr = mock.Mock()
