@@ -131,6 +131,9 @@ class Sonarr:
         })
 
 
+CHECKING = (1, 2)  # Transmission status: waiting to verify, verifying
+
+
 def bad_files(torrent, exts):
     """The file that makes the torrent unwanted: only single-file torrents match."""
     files = [f["name"] for f in torrent.get("files", [])]
@@ -145,11 +148,13 @@ def log(msg, file=sys.stdout):
 
 
 def sweep(client, sonarr, exts, delete_data, dry_run):
-    torrents = client.call("torrent-get", {"fields": ["id", "name", "hashString", "files"]})["torrents"]
+    torrents = client.call("torrent-get", {"fields": ["id", "name", "hashString", "files", "status"]})["torrents"]
     queue = None  # fetched lazily, once per sweep
     for t in torrents:
         hits = bad_files(t, exts)
         if not hits:
+            continue
+        if t.get("status") in CHECKING:  # mid-verification; Transmission has ignored removal here
             continue
         record = None
         if sonarr:
@@ -163,6 +168,8 @@ def sweep(client, sonarr, exts, delete_data, dry_run):
             continue
         if record:
             sonarr.blocklist(record["id"])
+        # Stop first: removing a torrent mid-transfer has been ignored by Transmission.
+        client.call("torrent-stop", {"ids": [t["id"]]})
         client.call("torrent-remove", {"ids": [t["id"]], "delete-local-data": delete_data})
         # "success" only means the request was accepted; confirm it is gone.
         left = client.call("torrent-get", {"ids": [t["id"]], "fields": ["id", "status", "errorString"]})["torrents"]

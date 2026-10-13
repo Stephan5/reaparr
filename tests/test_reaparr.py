@@ -231,6 +231,22 @@ class SweepTest(unittest.TestCase):
         self.assertEqual(order[0], ("blocklist", 9))
         self.assertEqual(order[1][0], "torrent-remove")
 
+    def test_stops_torrent_before_removing(self):
+        order = []
+        self.client.call.side_effect = lambda m, a=None: (
+            order.append((m, a)) if m in ("torrent-stop", "torrent-remove") else None) or self.fake_call(m, a)
+        self.run_sweep()
+        self.assertEqual([o[0] for o in order], ["torrent-stop", "torrent-remove"])
+        self.assertEqual(order[0][1], {"ids": [1]})
+
+    def test_skips_torrent_while_verifying_then_removes(self):
+        self.torrents[0]["status"] = 2
+        self.run_sweep()
+        self.assertEqual(self.removals(), [])
+        self.torrents[0]["status"] = 4
+        self.run_sweep()
+        self.assertEqual(len(self.removals()), 1)
+
     def test_logs_hash_on_removal(self):
         self.run_sweep()
         self.assertIn("[aa11]", self.log.call_args_list[0][0][0])
