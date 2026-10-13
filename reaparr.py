@@ -131,6 +131,9 @@ class Sonarr:
         })
 
 
+REMOVE_CHECKS = 5  # how many times to look for a removed torrent...
+REMOVE_CHECK_DELAY = 1  # ...and seconds between looks
+
 CHECKING = (1, 2)  # Transmission status: waiting to verify, verifying
 
 
@@ -171,8 +174,13 @@ def sweep(client, sonarr, exts, delete_data, dry_run):
         # Stop first: removing a torrent mid-transfer has been ignored by Transmission.
         client.call("torrent-stop", {"ids": [t["id"]]})
         client.call("torrent-remove", {"ids": [t["id"]], "delete-local-data": delete_data})
-        # "success" only means the request was accepted; confirm it is gone.
-        left = client.call("torrent-get", {"ids": [t["id"]], "fields": ["id", "status", "errorString"]})["torrents"]
+        # "success" only means the request was accepted, and the Mac app removes
+        # asynchronously; give it a moment, then confirm the torrent is gone.
+        for _ in range(REMOVE_CHECKS):
+            left = client.call("torrent-get", {"ids": [t["id"]], "fields": ["id", "status", "errorString"]})["torrents"]
+            if not left:
+                break
+            time.sleep(REMOVE_CHECK_DELAY)
         if left:
             log(f"error: {t['name']} [{t['hashString']}] still in Transmission after removal "
                 f"(status {left[0].get('status')}, error {left[0].get('errorString') or 'none'!r})",

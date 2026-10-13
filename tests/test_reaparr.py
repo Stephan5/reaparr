@@ -199,7 +199,7 @@ class SweepTest(unittest.TestCase):
         return {}
 
     def run_sweep(self, sonarr=None, delete_data=True, dry_run=False):
-        with mock.patch("reaparr.log") as log:
+        with mock.patch("reaparr.log") as log, mock.patch("reaparr.time.sleep") as self.sleep:
             reaparr.sweep(self.client, sonarr, EXTS, delete_data, dry_run)
         self.log = log
 
@@ -254,6 +254,22 @@ class SweepTest(unittest.TestCase):
     def test_removal_verified_quietly_when_gone(self):
         self.run_sweep()
         self.assertEqual(len(self.log.call_args_list), 1)
+
+    def test_slow_removal_is_waited_for(self):
+        pending = []
+        def slow(method, args=None):
+            if method == "torrent-remove":
+                pending.append(args["ids"])  # gone only after the first look
+                return {}
+            if method == "torrent-get" and pending and (args or {}).get("ids"):
+                if getattr(self, "looks", 0) >= 1:
+                    self.torrents[:] = [t for t in self.torrents if t["id"] not in pending[0]]
+                self.looks = getattr(self, "looks", 0) + 1
+            return self.fake_call(method, args)
+        self.client.call.side_effect = slow
+        self.run_sweep()
+        self.assertEqual(self.sleep.call_count, 1)
+        self.assertEqual(len(self.log.call_args_list), 1)  # no error logged
 
     def test_logs_error_when_torrent_survives_removal(self):
         self.stuck = True
