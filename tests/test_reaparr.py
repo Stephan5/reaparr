@@ -185,6 +185,9 @@ class SweepTest(unittest.TestCase):
             {"id": 2, "name": "good", "hashString": "bb22", "files": [{"name": "x.mkv"}]},
             {"id": 3, "name": "pack", "hashString": "cc33", "files": [{"name": "a.exe"}, {"name": "b.txt"}]},
         ]
+        reaparr.PENDING.clear()
+        self.now = 1000.0
+        self.log = mock.Mock()  # accumulates across sweeps
         self.client = mock.Mock()
         self.client.call.side_effect = self.fake_call
         self.removals = lambda: [c for c in self.client.call.call_args_list if c[0][0] == "torrent-remove"]
@@ -199,9 +202,14 @@ class SweepTest(unittest.TestCase):
         return {}
 
     def run_sweep(self, sonarr=None, delete_data=True, dry_run=False):
-        with mock.patch("reaparr.log") as log, mock.patch("reaparr.time.sleep") as self.sleep:
+        def sleep(seconds):
+            self.now += seconds
+            self.slept += seconds
+        self.slept = 0
+        with mock.patch("reaparr.log", self.log), \
+                mock.patch("reaparr.time.monotonic", side_effect=lambda: self.now), \
+                mock.patch("reaparr.time.sleep", side_effect=sleep):
             reaparr.sweep(self.client, sonarr, EXTS, delete_data, dry_run)
-        self.log = log
 
     def test_removes_only_matching(self):
         self.run_sweep()
@@ -231,14 +239,6 @@ class SweepTest(unittest.TestCase):
         self.assertEqual(order[0], ("blocklist", 9))
         self.assertEqual(order[1][0], "torrent-remove")
 
-    def test_stops_torrent_before_removing(self):
-        order = []
-        self.client.call.side_effect = lambda m, a=None: (
-            order.append((m, a)) if m in ("torrent-stop", "torrent-remove") else None) or self.fake_call(m, a)
-        self.run_sweep()
-        self.assertEqual([o[0] for o in order], ["torrent-stop", "torrent-remove"])
-        self.assertEqual(order[0][1], {"ids": [1]})
-
     def test_skips_torrent_while_verifying_then_removes(self):
         self.torrents[0]["status"] = 2
         self.run_sweep()
@@ -247,38 +247,78 @@ class SweepTest(unittest.TestCase):
         self.run_sweep()
         self.assertEqual(len(self.removals()), 1)
 
+    def sweep_at(self, t):
+        self.now = 1000.0 + t
+        self.run_sweep()
+
+    def logged(self):
+        return [c[0][0] for c in self.log.call_args_list]
+
+    def test_quick_removal_is_logged_straight_away(self):
+        self.run_sweep()
+        self.assertEqual(self.logged()[-1], "REMOVED: bad [aa11] after 0s")
+        self.assertEqual(reaparr.PENDING, {})
+        self.assertEqual(self.slept, 0)
+
+    def test_removal_caught_while_polling(self):
+        looks = []
+        def slow(method, args=None):
+            if method == "torrent-get" and (args or {}).get("ids"):
+                looks.append(1)
+                if len(looks) == 3:  # appears to be gone on the third look
+                    self.torrents[:] = [t for t in self.torrents if t["id"] != 1]
+            return self.fake_call(method, args) if method != "torrent-remove" else {}
+        self.client.call.side_effect = slow
+        self.run_sweep()
+        self.assertEqual(self.logged()[-1], "REMOVED: bad [aa11] after 2s")
+        self.assertEqual(reaparr.PENDING, {})
+
+    def test_still_present_after_polling_stays_pending(self):
+        self.stuck = True
+        self.run_sweep()
+        self.assertEqual(self.slept, reaparr.REMOVE_CHECKS * reaparr.REMOVE_CHECK_DELAY)
+        self.assertEqual(len(self.logged()), 1)  # only REMOVING
+        self.assertIn("aa11", reaparr.PENDING)
+
+    def test_no_stop_call(self):
+        self.run_sweep()
+        self.assertNotIn("torrent-stop", [c[0][0] for c in self.client.call.call_args_list])
+
+    def test_logs_time_taken_once_removal_is_seen(self):
+        self.stuck = True
+        self.sweep_at(0)
+        self.stuck = False
+        self.torrents[:] = [t for t in self.torrents if t["id"] != 1]  # Transmission catches up
+        self.sweep_at(41)
+        self.assertEqual(self.logged()[-1], "REMOVED: bad [aa11] after 41s")
+        self.assertEqual(reaparr.PENDING, {})
+        self.sweep_at(71)
+        self.assertEqual(len(self.logged()), 2)  # nothing further
+
+    def test_pending_removal_is_not_resent_each_sweep(self):
+        self.stuck = True
+        self.sweep_at(0)
+        self.sweep_at(30)
+        self.sweep_at(60)
+        self.assertEqual(len(self.removals()), 1)
+        self.assertEqual(len(self.log.call_args_list), 1)
+
+    def test_pending_removal_retried_with_error_after_timeout(self):
+        self.stuck = True
+        self.torrents[0]["status"] = 4
+        self.sweep_at(0)
+        self.sweep_at(reaparr.RETRY_AFTER + 1)
+        self.assertEqual(len(self.removals()), 2)
+        self.assertIn("still in Transmission 301s after removal was requested", self.logged()[1])
+        self.assertEqual(self.log.call_args_list[1][1], {"file": sys.stderr})
+
+    def test_dry_run_leaves_nothing_pending(self):
+        self.run_sweep(dry_run=True)
+        self.assertEqual(reaparr.PENDING, {})
+
     def test_logs_hash_on_removal(self):
         self.run_sweep()
         self.assertIn("[aa11]", self.log.call_args_list[0][0][0])
-
-    def test_removal_verified_quietly_when_gone(self):
-        self.run_sweep()
-        self.assertEqual(len(self.log.call_args_list), 1)
-
-    def test_slow_removal_is_waited_for(self):
-        pending = []
-        def slow(method, args=None):
-            if method == "torrent-remove":
-                pending.append(args["ids"])  # gone only after the first look
-                return {}
-            if method == "torrent-get" and pending and (args or {}).get("ids"):
-                if getattr(self, "looks", 0) >= 1:
-                    self.torrents[:] = [t for t in self.torrents if t["id"] not in pending[0]]
-                self.looks = getattr(self, "looks", 0) + 1
-            return self.fake_call(method, args)
-        self.client.call.side_effect = slow
-        self.run_sweep()
-        self.assertEqual(self.sleep.call_count, 1)
-        self.assertEqual(len(self.log.call_args_list), 1)  # no error logged
-
-    def test_logs_error_when_torrent_survives_removal(self):
-        self.stuck = True
-        self.torrents[0]["status"] = 6
-        self.run_sweep()
-        msg = self.log.call_args_list[-1][0][0]
-        self.assertIn("still in Transmission", msg)
-        self.assertIn("aa11", msg)
-        self.assertEqual(self.log.call_args_list[-1][1], {"file": sys.stderr})
 
     def test_not_in_sonarr_queue_still_removed(self):
         sonarr = mock.Mock()

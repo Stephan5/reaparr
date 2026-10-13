@@ -131,8 +131,13 @@ class Sonarr:
         })
 
 
-REMOVE_CHECKS = 5  # how many times to look for a removed torrent...
-REMOVE_CHECK_DELAY = 1  # ...and seconds between looks
+# The Mac app handles torrent-remove asynchronously and can take anywhere from
+# seconds to minutes. Torrents we have asked to remove are tracked here (by hash)
+# until they disappear, rather than being asked again every sweep.
+PENDING = {}  # hash -> {"name", "since" (first request), "sent" (latest request)}
+RETRY_AFTER = 300  # seconds before a pending removal is reported and re-sent
+REMOVE_CHECKS = 5  # right after asking, look this many times...
+REMOVE_CHECK_DELAY = 1  # ...this many seconds apart, to catch quick removals
 
 CHECKING = (1, 2)  # Transmission status: waiting to verify, verifying
 
@@ -150,8 +155,16 @@ def log(msg, file=sys.stdout):
     print(f"{stamp} {msg}", file=file, flush=True)
 
 
+def log_removed(entry, h, now):
+    log(f"REMOVED: {entry['name']} [{h}] after {now - entry['since']:.0f}s")
+
+
 def sweep(client, sonarr, exts, delete_data, dry_run):
     torrents = client.call("torrent-get", {"fields": ["id", "name", "hashString", "files", "status"]})["torrents"]
+    now = time.monotonic()
+    present = {t["hashString"] for t in torrents}
+    for h in [h for h in PENDING if h not in present]:
+        log_removed(PENDING.pop(h), h, now)
     queue = None  # fetched lazily, once per sweep
     for t in torrents:
         hits = bad_files(t, exts)
@@ -159,6 +172,13 @@ def sweep(client, sonarr, exts, delete_data, dry_run):
             continue
         if t.get("status") in CHECKING:  # mid-verification; Transmission has ignored removal here
             continue
+        waiting = PENDING.get(t["hashString"])
+        if waiting:
+            if now - waiting["sent"] < RETRY_AFTER:
+                continue
+            log(f"error: {t['name']} [{t['hashString']}] still in Transmission "
+                f"{now - waiting['since']:.0f}s after removal was requested "
+                f"(status {t.get('status')}); retrying", file=sys.stderr)
         record = None
         if sonarr:
             if queue is None:
@@ -171,20 +191,17 @@ def sweep(client, sonarr, exts, delete_data, dry_run):
             continue
         if record:
             sonarr.blocklist(record["id"])
-        # Stop first: removing a torrent mid-transfer has been ignored by Transmission.
-        client.call("torrent-stop", {"ids": [t["id"]]})
         client.call("torrent-remove", {"ids": [t["id"]], "delete-local-data": delete_data})
-        # "success" only means the request was accepted, and the Mac app removes
-        # asynchronously; give it a moment, then confirm the torrent is gone.
+        # "success" only means the request was accepted. Look briefly for a quick
+        # removal; otherwise it stays pending and a later sweep confirms it.
+        h = t["hashString"]
+        entry = PENDING.setdefault(h, {"name": t["name"], "since": now})
+        entry["sent"] = now
         for _ in range(REMOVE_CHECKS):
-            left = client.call("torrent-get", {"ids": [t["id"]], "fields": ["id", "status", "errorString"]})["torrents"]
-            if not left:
+            if not client.call("torrent-get", {"ids": [t["id"]], "fields": ["id"]})["torrents"]:
+                log_removed(PENDING.pop(h), h, time.monotonic())
                 break
             time.sleep(REMOVE_CHECK_DELAY)
-        if left:
-            log(f"error: {t['name']} [{t['hashString']}] still in Transmission after removal "
-                f"(status {left[0].get('status')}, error {left[0].get('errorString') or 'none'!r})",
-                file=sys.stderr)
 
 
 def main():
