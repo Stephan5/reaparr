@@ -136,8 +136,6 @@ class Sonarr:
 # until they disappear, rather than being asked again every sweep.
 PENDING = {}  # hash -> {"name", "since" (first request), "sent" (latest request)}
 RETRY_AFTER = 300  # seconds before a pending removal is reported and re-sent
-REMOVE_CHECKS = 5  # right after asking, look this many times...
-REMOVE_CHECK_DELAY = 1  # ...this many seconds apart, to catch quick removals
 
 CHECKING = (1, 2)  # Transmission status: waiting to verify, verifying
 
@@ -192,16 +190,9 @@ def sweep(client, sonarr, exts, delete_data, dry_run):
         if record:
             sonarr.blocklist(record["id"])
         client.call("torrent-remove", {"ids": [t["id"]], "delete-local-data": delete_data})
-        # "success" only means the request was accepted. Look briefly for a quick
-        # removal; otherwise it stays pending and a later sweep confirms it.
-        h = t["hashString"]
-        entry = PENDING.setdefault(h, {"name": t["name"], "since": now})
+        # "success" only means the request was accepted; the next sweep confirms it.
+        entry = PENDING.setdefault(t["hashString"], {"name": t["name"], "since": now})
         entry["sent"] = now
-        for _ in range(REMOVE_CHECKS):
-            if not client.call("torrent-get", {"ids": [t["id"]], "fields": ["id"]})["torrents"]:
-                log_removed(PENDING.pop(h), h, time.monotonic())
-                break
-            time.sleep(REMOVE_CHECK_DELAY)
 
 
 def main():
@@ -215,7 +206,7 @@ def main():
     p.add_argument("--password", help="omit to be prompted when needed")
     p.add_argument("--sonarr-url", help="e.g. http://localhost:8989; enables Sonarr blocklisting")
     p.add_argument("--sonarr-api-key", help="omit to use Keychain (account 'sonarr', service 'reaparr')")
-    p.add_argument("--interval", type=float, default=30, help="seconds between checks (default: 30)")
+    p.add_argument("--interval", type=float, default=10, help="seconds between checks (default: 10)")
     p.add_argument("--keep-data", action="store_true", help="remove the torrent but keep downloaded files")
     p.add_argument("--dry-run", action="store_true", help="report matches without removing anything")
     p.add_argument("--once", action="store_true", help="check once and exit")

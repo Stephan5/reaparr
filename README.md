@@ -18,7 +18,7 @@ Transmission > Settings > Remote > enable remote access (note the port).
 |------------------------|---------------------------------------------------|--------------------------------------------------------------|
 | `--port`, `--host`     | 9091, localhost                                   | `--url` overrides both                                       |
 | `--ext`                | `arj bat cmd exe iso lnk lzh ps1 scr sh vbs zipx` | removed only if the torrent is a single file of one of these |
-| `--interval`           | 30                                                | seconds between checks                                       |
+| `--interval`           | 10                                                | seconds between checks                                       |
 | `--keep-data`          | off                                               | remove torrent, keep files                                   |
 | `--dry-run`            | off                                               | no removals                                                  |
 | `--once`               | off                                               | single check, then exit                                      |
@@ -67,7 +67,7 @@ Run `make install` after changing `reaparr.conf` or `reaparr.py`. Add `--dry-run
 
 ## Tests
 
-Stdlib `unittest`, no network or Transmission needed:
+Stdlib `unittest`, no network, Transmission or Sonarr needed:
 
 ```
 make test

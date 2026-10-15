@@ -254,31 +254,14 @@ class SweepTest(unittest.TestCase):
     def logged(self):
         return [c[0][0] for c in self.log.call_args_list]
 
-    def test_quick_removal_is_logged_straight_away(self):
+    def test_removal_confirmed_on_next_sweep(self):
         self.run_sweep()
-        self.assertEqual(self.logged()[-1], "REMOVED: bad [aa11] after 0s")
-        self.assertEqual(reaparr.PENDING, {})
-        self.assertEqual(self.slept, 0)
-
-    def test_removal_caught_while_polling(self):
-        looks = []
-        def slow(method, args=None):
-            if method == "torrent-get" and (args or {}).get("ids"):
-                looks.append(1)
-                if len(looks) == 3:  # appears to be gone on the third look
-                    self.torrents[:] = [t for t in self.torrents if t["id"] != 1]
-            return self.fake_call(method, args) if method != "torrent-remove" else {}
-        self.client.call.side_effect = slow
-        self.run_sweep()
-        self.assertEqual(self.logged()[-1], "REMOVED: bad [aa11] after 2s")
-        self.assertEqual(reaparr.PENDING, {})
-
-    def test_still_present_after_polling_stays_pending(self):
-        self.stuck = True
-        self.run_sweep()
-        self.assertEqual(self.slept, reaparr.REMOVE_CHECKS * reaparr.REMOVE_CHECK_DELAY)
         self.assertEqual(len(self.logged()), 1)  # only REMOVING
         self.assertIn("aa11", reaparr.PENDING)
+        self.assertEqual(self.slept, 0)
+        self.sweep_at(10)
+        self.assertEqual(self.logged()[-1], "REMOVED: bad [aa11] after 10s")
+        self.assertEqual(reaparr.PENDING, {})
 
     def test_no_stop_call(self):
         self.run_sweep()
