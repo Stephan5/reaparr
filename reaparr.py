@@ -24,7 +24,7 @@ import urllib.request
 from datetime import datetime
 
 
-DEFAULT_EXTS = ["arj", "bat", "cmd", "exe", "iso", "lnk", "lzh", "ps1", "scr", "sh", "vbs", "zipx"]
+DEFAULT_EXTS = ["7z", "arj", "bat", "cmd", "exe", "iso", "lnk", "lzh", "ps1", "scr", "sh", "vbs", "zipx"]
 
 
 class AuthError(Exception):

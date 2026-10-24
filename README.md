@@ -17,7 +17,7 @@ Transmission > Settings > Remote > enable remote access (note the port).
 | Option                 | Default                                           | Notes                                                        |
 |------------------------|---------------------------------------------------|--------------------------------------------------------------|
 | `--port`, `--host`     | 9091, localhost                                   | `--url` overrides both                                       |
-| `--ext`                | `arj bat cmd exe iso lnk lzh ps1 scr sh vbs zipx` | removed only if the torrent is a single file of one of these |
+| `--ext`                | `7z arj bat cmd exe iso lnk lzh ps1 scr sh vbs zipx` | removed only if the torrent is a single file of one of these |
 | `--interval`           | 10                                                | seconds between checks                                       |
 | `--keep-data`          | off                                               | remove torrent, keep files                                   |
 | `--dry-run`            | off                                               | no removals                                                  |
