@@ -18,11 +18,19 @@ Transmission > Settings > Remote > enable remote access (note the port).
 |------------------------|---------------------------------------------------|--------------------------------------------------------------|
 | `--port`, `--host`     | 9091, localhost                                   | `--url` overrides both                                       |
 | `--ext`                | `7z arj bat cmd exe iso lnk lzh ps1 scr sh vbs zipx` | removed only if the torrent is a single file of one of these |
+| `--tv-ext`             | `zip`                                             | as `--ext`, but only if it also looks like a TV release (see below); `--tv-ext` with no values disables |
 | `--interval`           | 10                                                | seconds between checks                                       |
 | `--keep-data`          | off                                               | remove torrent, keep files                                   |
 | `--dry-run`            | off                                               | no removals                                                  |
 | `--once`               | off                                               | single check, then exit                                      |
 | `--user`, `--password` | none                                              | see Auth                                                     |
+
+## Release-named archives
+
+A single `.zip` can be legitimate, so `--tv-ext` extensions are only removed when the torrent also looks like a TV release, i.e. either:
+
+- the torrent or file name contains a release marker: `SxxEyy`, a resolution (`720p`, `1080p`, `2160p`, ...) or a codec (`x264`, `H264`, `x265`, `HEVC`, `AV1`, `XviD`). Show names aren't matched. So `Abbott Elementary S06E06 Competition 1080p WEB H264 - CAKES.zip` goes, `holiday photos.zip` stays.
+- or Sonarr grabbed it: with `--sonarr-url`, a torrent in Sonarr's queue (same hash match used for blocklisting) is removed whatever its name. No tag or label needed.
 
 ## Auth
 

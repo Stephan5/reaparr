@@ -44,6 +44,23 @@ class BadFilesTest(unittest.TestCase):
         self.assertEqual(reaparr.bad_files({"files": []}, EXTS), [])
 
 
+class LooksLikeReleaseTest(unittest.TestCase):
+    def test_release_names(self):
+        for name in [
+            "Abbott Elementary S06E06 Competition 1080p WEB H264 - CAKES.zip",
+            "Scrubs 2026 S02E08 My Emergency 1080p WEB H264 - ETHEL.zip",
+            "Show.S1E2.zip",
+            "Some.Show.720p.HDTV.zip",
+            "something x265.zip",
+            "thing.HEVC-GRP.zip",
+        ]:
+            self.assertTrue(reaparr.looks_like_release(name), name)
+
+    def test_ordinary_names(self):
+        for name in ["photos.zip", "fonts-2026.zip", "Season 1 artwork.zip", "1080.zip", "S06.zip"]:
+            self.assertFalse(reaparr.looks_like_release(name), name)
+
+
 class KeychainTest(unittest.TestCase):
     def test_returns_stripped_secret(self):
         with mock.patch("subprocess.run", return_value=mock.Mock(stdout="s3cret\n")) as run:
@@ -178,7 +195,7 @@ class SonarrTest(unittest.TestCase):
                 self.s._request("GET", "/queue")
 
 
-class SweepTest(unittest.TestCase):
+class SweepBase(unittest.TestCase):
     def setUp(self):
         self.torrents = [
             {"id": 1, "name": "bad", "hashString": "aa11", "files": [{"name": "x.exe"}]},
@@ -201,7 +218,7 @@ class SweepTest(unittest.TestCase):
             self.torrents[:] = [t for t in self.torrents if t["id"] not in args["ids"]]
         return {}
 
-    def run_sweep(self, sonarr=None, delete_data=True, dry_run=False):
+    def run_sweep(self, sonarr=None, delete_data=True, dry_run=False, tv_exts=(".zip",)):
         def sleep(seconds):
             self.now += seconds
             self.slept += seconds
@@ -209,8 +226,10 @@ class SweepTest(unittest.TestCase):
         with mock.patch("reaparr.log", self.log), \
                 mock.patch("reaparr.time.monotonic", side_effect=lambda: self.now), \
                 mock.patch("reaparr.time.sleep", side_effect=sleep):
-            reaparr.sweep(self.client, sonarr, EXTS, delete_data, dry_run)
+            reaparr.sweep(self.client, sonarr, EXTS, delete_data, dry_run, tv_exts)
 
+
+class SweepTest(SweepBase):
     def test_removes_only_matching(self):
         self.run_sweep()
         calls = self.removals()
@@ -323,6 +342,72 @@ class SweepTest(unittest.TestCase):
         sonarr.queue_by_hash.assert_not_called()
 
 
+class TvExtSweepTest(SweepBase):
+    """--tv-ext: zips are removed only if release-named or in Sonarr's queue."""
+
+    def add(self, id_, name, h):
+        self.torrents.append({"id": id_, "name": name, "hashString": h, "files": [{"name": name + ".zip"}]})
+
+    def removed_ids(self):
+        return [c[0][1]["ids"][0] for c in self.removals()]
+
+    def test_release_named_zip_removed_without_sonarr(self):
+        self.add(4, "Scrubs 2026 S02E08 My Emergency 1080p WEB H264 - ETHEL", "dd44")
+        self.run_sweep()
+        self.assertEqual(self.removed_ids(), [1, 4])
+
+    def test_plain_zip_left_alone_without_sonarr(self):
+        self.add(4, "holiday photos", "dd44")
+        self.run_sweep()
+        self.assertEqual(self.removed_ids(), [1])
+
+    def test_plain_zip_removed_and_blocklisted_if_sonarr_grabbed_it(self):
+        self.add(4, "holiday photos", "dd44")
+        sonarr = mock.Mock()
+        sonarr.queue_by_hash.return_value = {"DD44": {"id": 9}}
+        self.run_sweep(sonarr=sonarr)
+        self.assertEqual(self.removed_ids(), [1, 4])
+        sonarr.blocklist.assert_called_once_with(9)
+
+    def test_plain_zip_not_in_sonarr_queue_left_alone(self):
+        self.add(4, "holiday photos", "dd44")
+        sonarr = mock.Mock()
+        sonarr.queue_by_hash.return_value = {}
+        self.run_sweep(sonarr=sonarr)
+        self.assertEqual(self.removed_ids(), [1])
+
+    def test_release_named_zip_in_queue_is_blocklisted(self):
+        self.torrents[:] = []
+        self.add(4, "Show S01E01 720p", "dd44")
+        sonarr = mock.Mock()
+        sonarr.queue_by_hash.return_value = {"DD44": {"id": 9}}
+        self.run_sweep(sonarr=sonarr)
+        sonarr.blocklist.assert_called_once_with(9)
+        sonarr.queue_by_hash.assert_called_once()
+
+    def test_tv_exts_disabled(self):
+        self.add(4, "Show S01E01 720p", "dd44")
+        self.run_sweep(tv_exts=())
+        self.assertEqual(self.removed_ids(), [1])
+
+    def test_multi_file_zip_never_matches(self):
+        self.torrents.append({"id": 4, "name": "Show S01E01 720p", "hashString": "dd44",
+                              "files": [{"name": "a.zip"}, {"name": "b.nfo"}]})
+        self.run_sweep()
+        self.assertEqual(self.removed_ids(), [1])
+
+    def test_sonarr_grabbed_zip_retried_after_leaving_queue(self):
+        self.stuck = True
+        self.add(4, "holiday photos", "dd44")
+        sonarr = mock.Mock()
+        sonarr.queue_by_hash.return_value = {"DD44": {"id": 9}}
+        self.run_sweep(sonarr=sonarr)
+        sonarr.queue_by_hash.return_value = {}  # blocklisting dropped it from the queue
+        self.now += reaparr.RETRY_AFTER + 1
+        self.run_sweep(sonarr=sonarr)
+        self.assertEqual(self.removed_ids().count(4), 2)
+
+
 class MainTest(unittest.TestCase):
     def run_main(self, argv):
         with mock.patch("sys.argv", ["reaparr.py"] + argv), \
@@ -335,11 +420,19 @@ class MainTest(unittest.TestCase):
     def test_once_runs_single_sweep_with_normalised_exts(self):
         sweep, tm = self.run_main(["--once", "--ext", "EXE", ".Iso"])
         sweep.assert_called_once()
-        client, sonarr, exts, delete_data, dry_run = sweep.call_args[0]
+        client, sonarr, exts, delete_data, dry_run, _ = sweep.call_args[0]
         self.assertEqual(exts, (".exe", ".iso"))
         self.assertIsNone(sonarr)
         self.assertTrue(delete_data)
         self.assertFalse(dry_run)
+
+    def test_tv_ext_default_and_override(self):
+        sweep, _ = self.run_main(["--once"])
+        self.assertEqual(sweep.call_args[0][5], (".zip",))
+        sweep, _ = self.run_main(["--once", "--tv-ext", "ZIP", ".rar"])
+        self.assertEqual(sweep.call_args[0][5], (".zip", ".rar"))
+        sweep, _ = self.run_main(["--once", "--tv-ext"])
+        self.assertEqual(sweep.call_args[0][5], ())
 
     def test_url_built_from_host_and_port(self):
         _, tm = self.run_main(["--once", "--host", "h", "--port", "1234"])
@@ -347,7 +440,7 @@ class MainTest(unittest.TestCase):
 
     def test_flags_propagate(self):
         sweep, _ = self.run_main(["--once", "--keep-data", "--dry-run"])
-        self.assertEqual(sweep.call_args[0][3:], (False, True))
+        self.assertEqual(sweep.call_args[0][3:5], (False, True))
 
     def test_sonarr_without_key_exits(self):
         with mock.patch("reaparr.keychain_password", return_value=None), \

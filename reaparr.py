@@ -15,6 +15,7 @@ import argparse
 import base64
 import getpass
 import json
+import re
 import subprocess
 import sys
 import time
@@ -25,6 +26,18 @@ from datetime import datetime
 
 
 DEFAULT_EXTS = ["7z", "arj", "bat", "cmd", "exe", "iso", "lnk", "lzh", "ps1", "scr", "sh", "vbs", "zipx"]
+# Plausibly legitimate on their own, so removed only when the torrent looks like
+# a TV release (see looks_like_release) or Sonarr grabbed it.
+DEFAULT_TV_EXTS = ["zip"]
+
+# Release-name markers, not show names: SxxEyy, resolution, video codec.
+RELEASE_RE = re.compile(
+    r"\bS\d{1,2}E\d{1,3}\b"
+    r"|\b(?:480|576|720|1080|2160)[pi]\b"
+    r"|\b[xh]\.?26[45]\b"
+    r"|\b(?:hevc|av1|xvid)\b",
+    re.IGNORECASE,
+)
 
 
 class AuthError(Exception):
@@ -148,6 +161,11 @@ def bad_files(torrent, exts):
     return []
 
 
+def looks_like_release(name):
+    """True for names like 'Show S06E06 Title 1080p WEB H264 - GRP.zip'."""
+    return bool(RELEASE_RE.search(name))
+
+
 def log(msg, file=sys.stdout):
     stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"{stamp} {msg}", file=file, flush=True)
@@ -157,31 +175,40 @@ def log_removed(entry, h, now):
     log(f"REMOVED: {entry['name']} [{h}] after {now - entry['since']:.0f}s")
 
 
-def sweep(client, sonarr, exts, delete_data, dry_run):
+def sweep(client, sonarr, exts, delete_data, dry_run, tv_exts=()):
     torrents = client.call("torrent-get", {"fields": ["id", "name", "hashString", "files", "status"]})["torrents"]
     now = time.monotonic()
     present = {t["hashString"] for t in torrents}
     for h in [h for h in PENDING if h not in present]:
         log_removed(PENDING.pop(h), h, now)
     queue = None  # fetched lazily, once per sweep
+
+    def queued(t):
+        nonlocal queue
+        if not sonarr:
+            return None
+        if queue is None:
+            queue = sonarr.queue_by_hash()
+        return queue.get(t["hashString"].upper())
+
     for t in torrents:
         hits = bad_files(t, exts)
-        if not hits:
+        tv_hits = [] if hits else bad_files(t, tv_exts)
+        if not (hits or tv_hits):
             continue
         if t.get("status") in CHECKING:  # mid-verification; Transmission has ignored removal here
             continue
         waiting = PENDING.get(t["hashString"])
+        if waiting and now - waiting["sent"] < RETRY_AFTER:
+            continue
+        # Already judged bad if pending (and Sonarr has dropped it from the queue by now).
+        if tv_hits and not waiting and not looks_like_release(f"{t['name']} {tv_hits[0]}") and not queued(t):
+            continue  # e.g. a zip that is neither release-named nor a Sonarr grab
         if waiting:
-            if now - waiting["sent"] < RETRY_AFTER:
-                continue
             log(f"error: {t['name']} [{t['hashString']}] still in Transmission "
                 f"{now - waiting['since']:.0f}s after removal was requested "
                 f"(status {t.get('status')}); retrying", file=sys.stderr)
-        record = None
-        if sonarr:
-            if queue is None:
-                queue = sonarr.queue_by_hash()
-            record = queue.get(t["hashString"].upper())
+        record = queued(t)
         via = "; blocklisting in Sonarr" if record else ("; not in Sonarr queue" if sonarr else "")
         action = "WOULD REMOVE" if dry_run else "REMOVING"
         log(f"{action}: {t['name']} [{t['hashString']}]{via}")
@@ -199,6 +226,10 @@ def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--ext", nargs="+", default=DEFAULT_EXTS,
                    help="extensions to remove when the torrent is a single file (default: %(default)s)")
+    p.add_argument("--tv-ext", nargs="*", default=DEFAULT_TV_EXTS,
+                   help="extensions to remove when the torrent is a single file AND its name looks like a "
+                        "TV release (SxxEyy, resolution or codec) or it is in Sonarr's queue; "
+                        "give no values to disable (default: %(default)s)")
     p.add_argument("--host", default="localhost", help="Transmission host (default: localhost)")
     p.add_argument("--port", type=int, default=9091, help="Transmission RPC port (default: 9091)")
     p.add_argument("--url", help="full RPC URL; overrides --host/--port")
@@ -213,6 +244,7 @@ def main():
     args = p.parse_args()
 
     exts = tuple("." + e.lstrip(".").lower() for e in args.ext)
+    tv_exts = tuple("." + e.lstrip(".").lower() for e in args.tv_ext)
     url = args.url or f"http://{args.host}:{args.port}/transmission/rpc"
     client = Transmission(url, args.user, args.password)
     sonarr = None
@@ -223,12 +255,13 @@ def main():
         if not key:
             sys.exit("error: --sonarr-url given but no API key (use --sonarr-api-key or Keychain)")
         sonarr = Sonarr(args.sonarr_url, key)
-    log(f"Watching for single-file torrents of {', '.join(exts)} every {args.interval:g}s"
+    tv = f" (plus {', '.join(tv_exts)} if release-named or from Sonarr)" if tv_exts else ""
+    log(f"Watching for single-file torrents of {', '.join(exts)}{tv} every {args.interval:g}s"
         f"{' (dry run)' if args.dry_run else ''}{', Sonarr enabled' if sonarr else ''}")
 
     while True:
         try:
-            sweep(client, sonarr, exts, not args.keep_data, args.dry_run)
+            sweep(client, sonarr, exts, not args.keep_data, args.dry_run, tv_exts)
         except AuthError as e:
             log(f"error: {e}", file=sys.stderr)
             sys.exit(1)
