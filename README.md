@@ -1,40 +1,42 @@
 # reaparr
 
-Watches Transmission via its RPC API and removes single-file torrents of unwanted file types. 
-It optionally also blocklists the releases in Sonarr, so they won't be downloaded again.
+Watches Transmission via its RPC API for single-file torrents of unwanted file types that **Sonarr or Radarr grabbed**, blocklists the release there (so they search for a replacement), then removes the torrent.
+
+Anything not in Sonarr's or Radarr's queue is never touched, so torrents you add yourself are safe.
 
 ## Requirements
 
-Transmission > Settings > Remote > enable remote access (note the port).
+- Transmission > Settings > Remote > enable remote access (note the port).
+- Sonarr and/or Radarr using that Transmission as a download client.
 
 ## Usage
 
 ```
-./reaparr.py --dry-run     # report only
-./reaparr.py               # really delete
+./reaparr.py --sonarr-url http://localhost:8989 --radarr-url http://localhost:7878 --dry-run   # report only
+./reaparr.py --sonarr-url http://localhost:8989 --radarr-url http://localhost:7878             # really delete
 ```
 
-| Option                 | Default                                           | Notes                                                        |
-|------------------------|---------------------------------------------------|--------------------------------------------------------------|
-| `--port`, `--host`     | 9091, localhost                                   | `--url` overrides both                                       |
-| `--dangerous-ext`      | `arj bat cmd exe iso lnk lzh ps1 scr sh vbs zipx` | always removed (alias: `--ext`)                              |
-| `--suspicious-ext`     | `7z rar zip`                                      | removed only with a second piece of evidence (see below)     |
-| `--interval`           | 10                                                | seconds between checks                                       |
-| `--keep-data`          | off                                               | remove torrent, keep files                                   |
-| `--dry-run`            | off                                               | no removals                                                  |
-| `--once`               | off                                               | single check, then exit                                      |
-| `--user`, `--password` | none                                              | see Auth                                                     |
+| Option                       | Default                                           | Notes                                              |
+|------------------------------|---------------------------------------------------|----------------------------------------------------|
+| `--sonarr-url`, `--radarr-url` | none                                            | at least one required; see Sonarr / Radarr         |
+| `--port`, `--host`           | 9091, localhost                                   | `--url` overrides both                             |
+| `--dangerous-ext`            | `arj bat cmd exe iso lnk lzh ps1 scr sh vbs zipx` | alias: `--ext`                                     |
+| `--archive-ext`              | `7z rar zip`                                      | same rules as `--dangerous-ext`                    |
+| `--interval`                 | 10                                                | seconds between checks                             |
+| `--keep-data`                | off                                               | remove torrent, keep files                         |
+| `--dry-run`                  | off                                               | no removals                                        |
+| `--once`                     | off                                               | single check, then exit                            |
+| `--user`, `--password`       | none                                              | see Auth                                           |
 
-## Dangerous vs suspicious
+## What gets removed
 
-Only torrents that are a single file are considered; multi-file torrents are never touched.
+A torrent is removed only if all of these hold:
 
-- **Dangerous** extensions are removed on sight, whether or not Sonarr knows about the torrent.
-- **Suspicious** extensions (archives) can be legitimate, so they are only removed if there is also a second piece of evidence:
-  - the torrent or file name contains a release marker: `SxxEyy`, a resolution (`720p`, `1080p`, `2160p`, ...) or a codec (`x264`, `H264`, `x265`, `HEVC`, `AV1`, `XviD`). Show names aren't matched. So `Abbott Elementary S06E06 Competition 1080p WEB H264 - CAKES.zip` goes, `holiday photos.zip` stays;
-  - or Sonarr grabbed it: with `--sonarr-url`, the torrent is in Sonarr's queue (the same hash match used for blocklisting), whatever its name.
+- it is a single file (multi-file torrents are never touched);
+- that file has a `--dangerous-ext` or `--archive-ext` extension. The two lists are treated the same and kept apart only so each can be changed on its own. An extension in both is listed once. Give either option with no values to empty it;
+- its hash is in Sonarr's or Radarr's queue.
 
-The log line says which evidence matched, e.g. `REMOVING: ... (suspicious, release name); not in Sonarr queue`. An extension in both lists is treated as dangerous. Pass either option with no values to empty that list.
+Matching torrents that aren't in either queue are logged once as `SKIPPING` and checked again every sweep. Sonarr and Radarr poll the download client periodically, so a fresh grab can take a short while to show up in their queue. It's removed once it does.
 
 ## Auth
 
@@ -44,14 +46,15 @@ Password lookup order: `--password`, macOS Keychain, interactive prompt (also pr
 security add-generic-password -a USERNAME -s reaparr -w
 ```
 
-## Sonarr
+## Sonarr / Radarr
 
-With `--sonarr-url http://localhost:8989`, a matching torrent that is in Sonarr's queue (matched by torrent hash) is first removed from the queue and **blocklisted** via the Sonarr API (Sonarr then searches for a replacement), then removed from Transmission. Torrents not in Sonarr's queue are just removed from Transmission.
+`--sonarr-url http://localhost:8989` and/or `--radarr-url http://localhost:7878`. For each matching torrent (matched by hash), reaparr removes the item from that app's queue with **blocklist** on (via `DELETE /api/v3/queue/{id}`, which both apps share). The app then searches for a replacement, and reaparr removes the torrent from Transmission itself, so `--keep-data` works.
 
-API key (Sonarr > Settings > General): `--sonarr-api-key`, else Keychain, else prompt.
+API keys (Settings > General in each app): `--sonarr-api-key` / `--radarr-api-key`, else Keychain, else prompt.
 
 ```
 security add-generic-password -a sonarr -s reaparr -w
+security add-generic-password -a radarr -s reaparr -w
 ```
 
 ## launchd

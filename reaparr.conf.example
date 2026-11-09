@@ -5,5 +5,8 @@
 9091
 --user
 YOUR_TRANSMISSION_USERNAME
+# At least one of these is required; delete the one you don't use.
 --sonarr-url
 http://localhost:8989
+--radarr-url
+http://localhost:7878
