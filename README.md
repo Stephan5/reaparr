@@ -20,7 +20,8 @@ Anything not in Sonarr's or Radarr's queue is never touched, so torrents you add
 |------------------------------|---------------------------------------------------|----------------------------------------------------|
 | `--sonarr-url`, `--radarr-url` | none                                            | at least one required; see Sonarr / Radarr         |
 | `--port`, `--host`           | 9091, localhost                                   | `--url` overrides both                             |
-| `--ext`                      | `7z arj bat cmd exe iso lnk lzh ps1 scr sh vbs zipx` |                                                 |
+| `--dangerous-ext`            | `apk bat cmd com dmg exe hta img iso js jse lnk msi pif ps1 scr sh vbs wsf` | executables, installers, scripts, shortcuts, disk images; alias: `--ext` |
+| `--archive-ext`              | `7z arj bz2 cab gz lzh rar tar tgz xz zip zipx`   | same rules as `--dangerous-ext`                    |
 | `--interval`                 | 10                                                | seconds between checks                             |
 | `--keep-data`                | off                                               | remove torrent, keep files                         |
 | `--dry-run`                  | off                                               | no removals                                        |
@@ -32,7 +33,7 @@ Anything not in Sonarr's or Radarr's queue is never touched, so torrents you add
 A torrent is removed only if all of these hold:
 
 - it is a single file (multi-file torrents are never touched);
-- that file has one of the `--ext` extensions;
+- that file has a `--dangerous-ext` or `--archive-ext` extension. The two lists are treated the same and kept apart only so each can be changed on its own. An extension in both is listed once. Give either option with no values to empty it;
 - its hash is in Sonarr's or Radarr's queue.
 
 Matching torrents that aren't in either queue are logged once as `SKIPPING` and checked again every sweep. Sonarr and Radarr poll the download client periodically, so a fresh grab can take a short while to show up in their queue. It's removed once it does.

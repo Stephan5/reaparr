@@ -217,7 +217,7 @@ class SweepBase(unittest.TestCase):
     def add(self, id_, h, filename, name=None):
         self.torrents.append({"id": id_, "name": name or filename, "hashString": h, "files": [{"name": filename}]})
 
-    def run_sweep(self, delete_data=True, dry_run=False):
+    def run_sweep(self, delete_data=True, dry_run=False, archives=(".7z", ".rar", ".zip")):
         def sleep(seconds):
             self.now += seconds
             self.slept += seconds
@@ -225,7 +225,7 @@ class SweepBase(unittest.TestCase):
         with mock.patch("reaparr.log", self.log), \
                 mock.patch("reaparr.time.monotonic", side_effect=lambda: self.now), \
                 mock.patch("reaparr.time.sleep", side_effect=sleep):
-            reaparr.sweep(self.client, self.arrs, EXTS, delete_data, dry_run)
+            reaparr.sweep(self.client, self.arrs, EXTS, delete_data, dry_run, archives)
 
     def sweep_at(self, t):
         self.now = 1000.0 + t
@@ -361,6 +361,28 @@ class GrabbedOnlyTest(SweepBase):
         self.run_sweep()
         self.assertEqual(reaparr.SKIPPED, set())
 
+    def test_archives_treated_like_dangerous(self):
+        for i, ext in enumerate((".7z", ".rar", ".zip")):
+            self.add(10 + i, f"e{i}", f"Show S01E0{i} 1080p WEB H264 - GRP{ext}")
+            self.add(20 + i, f"f{i}", f"photos {i}{ext}")
+        self.sonarr.queue_by_hash.return_value = {"AA11": {"id": 9}, "E0": {"id": 1}, "E2": {"id": 2}}
+        self.radarr.queue_by_hash.return_value = {"F1": {"id": 7}}
+        self.run_sweep()
+        self.assertEqual(sorted(self.removed_ids()), [1, 10, 12, 21])  # queued ones only, whatever the name
+
+    def test_archives_disabled(self):
+        self.add(4, "dd44", "a.zip")
+        self.sonarr.queue_by_hash.return_value = {"AA11": {"id": 9}, "DD44": {"id": 1}}
+        self.run_sweep(archives=())
+        self.assertEqual(self.removed_ids(), [1])
+
+    def test_multi_file_archive_never_matches(self):
+        self.torrents.append({"id": 4, "name": "x", "hashString": "dd44",
+                              "files": [{"name": "a.zip"}, {"name": "b.nfo"}]})
+        self.sonarr.queue_by_hash.return_value = {"AA11": {"id": 9}, "DD44": {"id": 1}}
+        self.run_sweep()
+        self.assertEqual(self.removed_ids(), [1])
+
 
 class MainTest(unittest.TestCase):
     SONARR = ["--sonarr-url", "http://s", "--sonarr-api-key", "K"]
@@ -374,13 +396,34 @@ class MainTest(unittest.TestCase):
         return sweep, tm
 
     def test_once_runs_single_sweep_with_normalised_exts(self):
-        sweep, tm = self.run_main(["--once", "--ext", "EXE", ".Iso"])
+        sweep, tm = self.run_main(["--once", "--ext", "EXE", ".Iso"])  # --ext still works
         sweep.assert_called_once()
-        client, arrs, exts, delete_data, dry_run = sweep.call_args[0]
+        client, arrs, exts, delete_data, dry_run, _ = sweep.call_args[0]
         self.assertEqual(exts, (".exe", ".iso"))
         self.assertEqual([a.name for a in arrs], ["Sonarr"])
         self.assertTrue(delete_data)
         self.assertFalse(dry_run)
+
+    def test_default_lists(self):
+        sweep, _ = self.run_main(["--once"])
+        dangerous, archives = sweep.call_args[0][2], sweep.call_args[0][5]
+        self.assertEqual(archives, tuple("." + e for e in reaparr.ARCHIVE_EXTS))
+        self.assertIn(".tar", archives)
+        self.assertIn(".msi", dangerous)
+        self.assertIn(".exe", dangerous)
+        self.assertEqual(set(dangerous) & set(archives), set())
+
+    def test_archive_override_and_disable(self):
+        sweep, _ = self.run_main(["--once", "--archive-ext", "ZIP", ".tar"])
+        self.assertEqual(sweep.call_args[0][5], (".zip", ".tar"))
+        sweep, _ = self.run_main(["--once", "--archive-ext"])
+        self.assertEqual(sweep.call_args[0][5], ())
+
+    def test_overlap_listed_once(self):
+        sweep, _ = self.run_main(["--once", "--dangerous-ext", "exe", "ZIP"])
+        self.assertEqual(sweep.call_args[0][2], (".exe", ".zip"))
+        self.assertNotIn(".zip", sweep.call_args[0][5])
+        self.assertIn(".7z", sweep.call_args[0][5])
 
     def test_url_built_from_host_and_port(self):
         _, tm = self.run_main(["--once", "--host", "h", "--port", "1234"])
@@ -388,7 +431,7 @@ class MainTest(unittest.TestCase):
 
     def test_flags_propagate(self):
         sweep, _ = self.run_main(["--once", "--keep-data", "--dry-run"])
-        self.assertEqual(sweep.call_args[0][3:], (False, True))
+        self.assertEqual(sweep.call_args[0][3:5], (False, True))
 
     def test_sonarr_and_radarr(self):
         sweep, _ = self.run_main(["--once", "--radarr-url", "http://r:7878/", "--radarr-api-key", "R"])
