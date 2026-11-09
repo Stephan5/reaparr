@@ -28,8 +28,8 @@ from datetime import datetime
 
 # Both lists are treated the same; they are kept apart so either can be
 # changed or emptied on its own.
-DANGEROUS_EXTS = ["arj", "bat", "cmd", "exe", "iso", "lnk", "lzh", "ps1", "scr", "sh", "vbs", "zipx"]
-ARCHIVE_EXTS = ["7z", "rar", "zip"]
+DANGEROUS_EXTS = ["bat", "cmd", "exe", "iso", "lnk", "ps1", "scr", "sh", "vbs"]
+ARCHIVE_EXTS = ["7z", "arj", "lzh", "rar", "zip", "zipx"]
 
 
 class AuthError(Exception):

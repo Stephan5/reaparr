@@ -406,9 +406,10 @@ class MainTest(unittest.TestCase):
 
     def test_default_lists(self):
         sweep, _ = self.run_main(["--once"])
-        self.assertEqual(sweep.call_args[0][5], (".7z", ".rar", ".zip"))
-        self.assertIn(".exe", sweep.call_args[0][2])
-        self.assertNotIn(".7z", sweep.call_args[0][2])
+        dangerous, archives = sweep.call_args[0][2], sweep.call_args[0][5]
+        self.assertEqual(archives, (".7z", ".arj", ".lzh", ".rar", ".zip", ".zipx"))
+        self.assertIn(".exe", dangerous)
+        self.assertEqual(set(dangerous) & set(archives), set())
 
     def test_archive_override_and_disable(self):
         sweep, _ = self.run_main(["--once", "--archive-ext", "ZIP", ".tar"])
@@ -419,7 +420,7 @@ class MainTest(unittest.TestCase):
     def test_overlap_listed_once(self):
         sweep, _ = self.run_main(["--once", "--dangerous-ext", "exe", "ZIP"])
         self.assertEqual(sweep.call_args[0][2], (".exe", ".zip"))
-        self.assertEqual(sweep.call_args[0][5], (".7z", ".rar"))
+        self.assertEqual(sweep.call_args[0][5], (".7z", ".arj", ".lzh", ".rar", ".zipx"))
 
     def test_url_built_from_host_and_port(self):
         _, tm = self.run_main(["--once", "--host", "h", "--port", "1234"])

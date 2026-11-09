@@ -20,8 +20,8 @@ Anything not in Sonarr's or Radarr's queue is never touched, so torrents you add
 |------------------------------|---------------------------------------------------|----------------------------------------------------|
 | `--sonarr-url`, `--radarr-url` | none                                            | at least one required; see Sonarr / Radarr         |
 | `--port`, `--host`           | 9091, localhost                                   | `--url` overrides both                             |
-| `--dangerous-ext`            | `arj bat cmd exe iso lnk lzh ps1 scr sh vbs zipx` | alias: `--ext`                                     |
-| `--archive-ext`              | `7z rar zip`                                      | same rules as `--dangerous-ext`                    |
+| `--dangerous-ext`            | `bat cmd exe iso lnk ps1 scr sh vbs`              | executables, scripts, shortcuts, disk images; alias: `--ext` |
+| `--archive-ext`              | `7z arj lzh rar zip zipx`                         | same rules as `--dangerous-ext`                    |
 | `--interval`                 | 10                                                | seconds between checks                             |
 | `--keep-data`                | off                                               | remove torrent, keep files                         |
 | `--dry-run`                  | off                                               | no removals                                        |
