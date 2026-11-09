@@ -1,6 +1,6 @@
 # reaparr
 
-Watches Transmission via its RPC API and removes torrents containing unwanted file types. 
+Watches Transmission via its RPC API and removes single-file torrents of unwanted file types. 
 It optionally also blocklists the releases in Sonarr, so they won't be downloaded again.
 
 ## Requirements
@@ -17,20 +17,24 @@ Transmission > Settings > Remote > enable remote access (note the port).
 | Option                 | Default                                           | Notes                                                        |
 |------------------------|---------------------------------------------------|--------------------------------------------------------------|
 | `--port`, `--host`     | 9091, localhost                                   | `--url` overrides both                                       |
-| `--ext`                | `7z arj bat cmd exe iso lnk lzh ps1 scr sh vbs zipx` | removed only if the torrent is a single file of one of these |
-| `--tv-ext`             | `zip`                                             | as `--ext`, but only if it also looks like a TV release (see below); `--tv-ext` with no values disables |
+| `--dangerous-ext`      | `arj bat cmd exe iso lnk lzh ps1 scr sh vbs zipx` | always removed (alias: `--ext`)                              |
+| `--suspicious-ext`     | `7z rar zip`                                      | removed only with a second piece of evidence (see below)     |
 | `--interval`           | 10                                                | seconds between checks                                       |
 | `--keep-data`          | off                                               | remove torrent, keep files                                   |
 | `--dry-run`            | off                                               | no removals                                                  |
 | `--once`               | off                                               | single check, then exit                                      |
 | `--user`, `--password` | none                                              | see Auth                                                     |
 
-## Release-named archives
+## Dangerous vs suspicious
 
-A single `.zip` can be legitimate, so `--tv-ext` extensions are only removed when the torrent also looks like a TV release, i.e. either:
+Only torrents that are a single file are considered; multi-file torrents are never touched.
 
-- the torrent or file name contains a release marker: `SxxEyy`, a resolution (`720p`, `1080p`, `2160p`, ...) or a codec (`x264`, `H264`, `x265`, `HEVC`, `AV1`, `XviD`). Show names aren't matched. So `Abbott Elementary S06E06 Competition 1080p WEB H264 - CAKES.zip` goes, `holiday photos.zip` stays.
-- or Sonarr grabbed it: with `--sonarr-url`, a torrent in Sonarr's queue (same hash match used for blocklisting) is removed whatever its name. No tag or label needed.
+- **Dangerous** extensions are removed on sight, whether or not Sonarr knows about the torrent.
+- **Suspicious** extensions (archives) can be legitimate, so they are only removed if there is also a second piece of evidence:
+  - the torrent or file name contains a release marker: `SxxEyy`, a resolution (`720p`, `1080p`, `2160p`, ...) or a codec (`x264`, `H264`, `x265`, `HEVC`, `AV1`, `XviD`). Show names aren't matched. So `Abbott Elementary S06E06 Competition 1080p WEB H264 - CAKES.zip` goes, `holiday photos.zip` stays;
+  - or Sonarr grabbed it: with `--sonarr-url`, the torrent is in Sonarr's queue (the same hash match used for blocklisting), whatever its name.
+
+The log line says which evidence matched, e.g. `REMOVING: ... (suspicious, release name); not in Sonarr queue`. An extension in both lists is treated as dangerous. Pass either option with no values to empty that list.
 
 ## Auth
 

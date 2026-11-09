@@ -218,7 +218,7 @@ class SweepBase(unittest.TestCase):
             self.torrents[:] = [t for t in self.torrents if t["id"] not in args["ids"]]
         return {}
 
-    def run_sweep(self, sonarr=None, delete_data=True, dry_run=False, tv_exts=(".zip",)):
+    def run_sweep(self, sonarr=None, delete_data=True, dry_run=False, suspicious=(".7z", ".rar", ".zip")):
         def sleep(seconds):
             self.now += seconds
             self.slept += seconds
@@ -226,7 +226,7 @@ class SweepBase(unittest.TestCase):
         with mock.patch("reaparr.log", self.log), \
                 mock.patch("reaparr.time.monotonic", side_effect=lambda: self.now), \
                 mock.patch("reaparr.time.sleep", side_effect=sleep):
-            reaparr.sweep(self.client, sonarr, EXTS, delete_data, dry_run, tv_exts)
+            reaparr.sweep(self.client, sonarr, EXTS, delete_data, dry_run, suspicious)
 
 
 class SweepTest(SweepBase):
@@ -342,11 +342,35 @@ class SweepTest(SweepBase):
         sonarr.queue_by_hash.assert_not_called()
 
 
-class TvExtSweepTest(SweepBase):
-    """--tv-ext: zips are removed only if release-named or in Sonarr's queue."""
+class SuspiciousSweepTest(SweepBase):
+    """Suspicious extensions need a release name or a Sonarr grab as well."""
 
-    def add(self, id_, name, h):
-        self.torrents.append({"id": id_, "name": name, "hashString": h, "files": [{"name": name + ".zip"}]})
+    def add(self, id_, name, h, ext=".zip"):
+        self.torrents.append({"id": id_, "name": name, "hashString": h, "files": [{"name": name + ext}]})
+
+    def test_each_default_suspicious_ext(self):
+        for i, ext in enumerate((".7z", ".rar", ".zip")):
+            self.add(10 + i, f"Show S01E0{i} 1080p", f"e{i}", ext)
+            self.add(20 + i, f"photos {i}", f"f{i}", ext)
+        self.run_sweep()
+        self.assertEqual(self.removed_ids(), [1, 10, 11, 12])
+
+    def test_logs_the_evidence(self):
+        self.torrents[:] = []
+        self.add(4, "Show S01E01 720p", "dd44")
+        self.add(5, "photos", "ee55")
+        sonarr = mock.Mock()
+        sonarr.queue_by_hash.return_value = {"EE55": {"id": 9}}
+        self.run_sweep(sonarr=sonarr, dry_run=True)
+        lines = [c[0][0] for c in self.log.call_args_list]
+        self.assertIn("(suspicious, release name); not in Sonarr queue", lines[0])
+        self.assertIn("(suspicious, in Sonarr queue); blocklisting in Sonarr", lines[1])
+
+    def test_dangerous_needs_no_evidence(self):
+        sonarr = mock.Mock()
+        sonarr.queue_by_hash.return_value = {}
+        self.run_sweep(sonarr=sonarr)
+        self.assertEqual(self.removed_ids(), [1])  # "bad"/x.exe: no release name, not queued
 
     def removed_ids(self):
         return [c[0][1]["ids"][0] for c in self.removals()]
@@ -385,9 +409,9 @@ class TvExtSweepTest(SweepBase):
         sonarr.blocklist.assert_called_once_with(9)
         sonarr.queue_by_hash.assert_called_once()
 
-    def test_tv_exts_disabled(self):
+    def test_suspicious_disabled(self):
         self.add(4, "Show S01E01 720p", "dd44")
-        self.run_sweep(tv_exts=())
+        self.run_sweep(suspicious=())
         self.assertEqual(self.removed_ids(), [1])
 
     def test_multi_file_zip_never_matches(self):
@@ -420,19 +444,32 @@ class MainTest(unittest.TestCase):
     def test_once_runs_single_sweep_with_normalised_exts(self):
         sweep, tm = self.run_main(["--once", "--ext", "EXE", ".Iso"])
         sweep.assert_called_once()
-        client, sonarr, exts, delete_data, dry_run, _ = sweep.call_args[0]
+        client, sonarr, exts, delete_data, dry_run, _ = sweep.call_args[0]  # --ext still works
         self.assertEqual(exts, (".exe", ".iso"))
         self.assertIsNone(sonarr)
         self.assertTrue(delete_data)
         self.assertFalse(dry_run)
 
-    def test_tv_ext_default_and_override(self):
+    def test_default_lists(self):
         sweep, _ = self.run_main(["--once"])
-        self.assertEqual(sweep.call_args[0][5], (".zip",))
-        sweep, _ = self.run_main(["--once", "--tv-ext", "ZIP", ".rar"])
-        self.assertEqual(sweep.call_args[0][5], (".zip", ".rar"))
-        sweep, _ = self.run_main(["--once", "--tv-ext"])
+        self.assertEqual(sweep.call_args[0][5], (".7z", ".rar", ".zip"))
+        self.assertIn(".exe", sweep.call_args[0][2])
+        self.assertNotIn(".7z", sweep.call_args[0][2])
+
+    def test_suspicious_override_and_disable(self):
+        sweep, _ = self.run_main(["--once", "--suspicious-ext", "ZIP", ".tar"])
+        self.assertEqual(sweep.call_args[0][5], (".zip", ".tar"))
+        sweep, _ = self.run_main(["--once", "--suspicious-ext"])
         self.assertEqual(sweep.call_args[0][5], ())
+
+    def test_dangerous_wins_over_suspicious(self):
+        sweep, _ = self.run_main(["--once", "--dangerous-ext", "exe", "ZIP"])
+        self.assertEqual(sweep.call_args[0][2], (".exe", ".zip"))
+        self.assertEqual(sweep.call_args[0][5], (".7z", ".rar"))
+
+    def test_ext_is_alias_for_dangerous(self):
+        sweep, _ = self.run_main(["--once", "--ext", "exe"])
+        self.assertEqual(sweep.call_args[0][2], (".exe",))
 
     def test_url_built_from_host_and_port(self):
         _, tm = self.run_main(["--once", "--host", "h", "--port", "1234"])
