@@ -134,9 +134,9 @@ class TransmissionTest(unittest.TestCase):
                 c.call("x")
 
 
-class SonarrTest(unittest.TestCase):
+class ArrTest(unittest.TestCase):
     def setUp(self):
-        self.s = reaparr.Sonarr("http://sonarr:8989/", "KEY")
+        self.s = reaparr.Arr("Sonarr", "http://sonarr:8989/", "KEY")
 
     def test_base_strips_trailing_slash(self):
         self.assertEqual(self.s.base, "http://sonarr:8989/api/v3")
@@ -172,13 +172,21 @@ class SonarrTest(unittest.TestCase):
         with mock.patch("urllib.request.urlopen", return_value=FakeResponse(b"")):
             self.assertIsNone(self.s._request("DELETE", "/queue/1"))
 
-    def test_401_raises_auth_error(self):
+    def test_401_raises_auth_error_naming_the_arr(self):
+        r = reaparr.Arr("Radarr", "http://radarr:7878", "KEY")
         with mock.patch("urllib.request.urlopen", side_effect=http_error(401)):
-            with self.assertRaises(reaparr.AuthError):
-                self.s._request("GET", "/queue")
+            with self.assertRaisesRegex(reaparr.AuthError, "Radarr"):
+                r._request("GET", "/queue")
 
 
-class SweepTest(unittest.TestCase):
+def fake_arr(name, queue):
+    arr = mock.Mock()
+    arr.name = name
+    arr.queue_by_hash.return_value = queue
+    return arr
+
+
+class SweepBase(unittest.TestCase):
     def setUp(self):
         self.torrents = [
             {"id": 1, "name": "bad", "hashString": "aa11", "files": [{"name": "x.exe"}]},
@@ -186,11 +194,16 @@ class SweepTest(unittest.TestCase):
             {"id": 3, "name": "pack", "hashString": "cc33", "files": [{"name": "a.exe"}, {"name": "b.txt"}]},
         ]
         reaparr.PENDING.clear()
+        reaparr.SKIPPED.clear()
         self.now = 1000.0
         self.log = mock.Mock()  # accumulates across sweeps
         self.client = mock.Mock()
         self.client.call.side_effect = self.fake_call
         self.removals = lambda: [c for c in self.client.call.call_args_list if c[0][0] == "torrent-remove"]
+        self.removed_ids = lambda: [c[0][1]["ids"][0] for c in self.removals()]
+        self.sonarr = fake_arr("Sonarr", {"AA11": {"id": 9}})
+        self.radarr = fake_arr("Radarr", {})
+        self.arrs = [self.sonarr, self.radarr]
 
     def fake_call(self, method, args=None):
         """Transmission stand-in: torrent-remove really removes unless self.stuck."""
@@ -201,7 +214,10 @@ class SweepTest(unittest.TestCase):
             self.torrents[:] = [t for t in self.torrents if t["id"] not in args["ids"]]
         return {}
 
-    def run_sweep(self, sonarr=None, delete_data=True, dry_run=False):
+    def add(self, id_, h, filename, name=None):
+        self.torrents.append({"id": id_, "name": name or filename, "hashString": h, "files": [{"name": filename}]})
+
+    def run_sweep(self, delete_data=True, dry_run=False):
         def sleep(seconds):
             self.now += seconds
             self.slept += seconds
@@ -209,8 +225,17 @@ class SweepTest(unittest.TestCase):
         with mock.patch("reaparr.log", self.log), \
                 mock.patch("reaparr.time.monotonic", side_effect=lambda: self.now), \
                 mock.patch("reaparr.time.sleep", side_effect=sleep):
-            reaparr.sweep(self.client, sonarr, EXTS, delete_data, dry_run)
+            reaparr.sweep(self.client, self.arrs, EXTS, delete_data, dry_run)
 
+    def sweep_at(self, t):
+        self.now = 1000.0 + t
+        self.run_sweep()
+
+    def logged(self):
+        return [c[0][0] for c in self.log.call_args_list]
+
+
+class SweepTest(SweepBase):
     def test_removes_only_matching(self):
         self.run_sweep()
         calls = self.removals()
@@ -222,20 +247,17 @@ class SweepTest(unittest.TestCase):
         self.assertFalse(self.removals()[0][0][1]["delete-local-data"])
 
     def test_dry_run_removes_nothing(self):
-        sonarr = mock.Mock()
-        sonarr.queue_by_hash.return_value = {"AA11": {"id": 9}}
-        self.run_sweep(sonarr=sonarr, dry_run=True)
+        self.run_sweep(dry_run=True)
         self.assertEqual(self.removals(), [])
-        sonarr.blocklist.assert_not_called()
+        self.sonarr.blocklist.assert_not_called()
+        self.assertEqual(self.logged(), ["WOULD REMOVE: bad [aa11]; blocklisting in Sonarr"])
 
-    def test_blocklists_in_sonarr_before_removing(self):
+    def test_blocklists_before_removing(self):
         order = []
-        sonarr = mock.Mock()
-        sonarr.queue_by_hash.return_value = {"AA11": {"id": 9}}
-        sonarr.blocklist.side_effect = lambda i: order.append(("blocklist", i))
+        self.sonarr.blocklist.side_effect = lambda i: order.append(("blocklist", i))
         self.client.call.side_effect = lambda m, a=None: (
             order.append((m, a)) if m == "torrent-remove" else None) or self.fake_call(m, a)
-        self.run_sweep(sonarr=sonarr)
+        self.run_sweep()
         self.assertEqual(order[0], ("blocklist", 9))
         self.assertEqual(order[1][0], "torrent-remove")
 
@@ -246,13 +268,6 @@ class SweepTest(unittest.TestCase):
         self.torrents[0]["status"] = 4
         self.run_sweep()
         self.assertEqual(len(self.removals()), 1)
-
-    def sweep_at(self, t):
-        self.now = 1000.0 + t
-        self.run_sweep()
-
-    def logged(self):
-        return [c[0][0] for c in self.log.call_args_list]
 
     def test_removal_confirmed_on_next_sweep(self):
         self.run_sweep()
@@ -290,8 +305,10 @@ class SweepTest(unittest.TestCase):
         self.stuck = True
         self.torrents[0]["status"] = 4
         self.sweep_at(0)
+        self.sonarr.queue_by_hash.return_value = {}  # blocklisting dropped it from the queue
         self.sweep_at(reaparr.RETRY_AFTER + 1)
         self.assertEqual(len(self.removals()), 2)
+        self.sonarr.blocklist.assert_called_once()  # not blocklisted twice
         self.assertIn("still in Transmission 301s after removal was requested", self.logged()[1])
         self.assertEqual(self.log.call_args_list[1][1], {"file": sys.stderr})
 
@@ -299,34 +316,58 @@ class SweepTest(unittest.TestCase):
         self.run_sweep(dry_run=True)
         self.assertEqual(reaparr.PENDING, {})
 
-    def test_logs_hash_on_removal(self):
+    def test_queues_fetched_once_and_lazily(self):
+        self.add(4, "dd44", "y.iso")
         self.run_sweep()
-        self.assertIn("[aa11]", self.log.call_args_list[0][0][0])
+        self.sonarr.queue_by_hash.assert_called_once()
+        self.radarr.queue_by_hash.assert_called_once()  # y.iso isn't in Sonarr's queue
 
-    def test_not_in_sonarr_queue_still_removed(self):
-        sonarr = mock.Mock()
-        sonarr.queue_by_hash.return_value = {}
-        self.run_sweep(sonarr=sonarr)
-        sonarr.blocklist.assert_not_called()
-        self.assertEqual(len(self.removals()), 1)
-
-    def test_queue_fetched_once_and_lazily(self):
-        sonarr = mock.Mock()
-        sonarr.queue_by_hash.return_value = {}
-        self.torrents.append({"id": 4, "name": "bad2", "hashString": "dd44", "files": [{"name": "y.iso"}]})
-        self.run_sweep(sonarr=sonarr)
-        sonarr.queue_by_hash.assert_called_once()
-
-        sonarr.reset_mock()
+        self.sonarr.reset_mock()
+        self.radarr.reset_mock()
         self.torrents[:] = [self.torrents[1]]
-        self.run_sweep(sonarr=sonarr)
-        sonarr.queue_by_hash.assert_not_called()
+        self.run_sweep()
+        self.sonarr.queue_by_hash.assert_not_called()
+        self.radarr.queue_by_hash.assert_not_called()
+
+    def test_later_arr_not_asked_if_earlier_has_it(self):
+        self.run_sweep()
+        self.radarr.queue_by_hash.assert_not_called()
+
+
+class GrabbedOnlyTest(SweepBase):
+    """Nothing is removed unless Sonarr or Radarr has it in its queue."""
+
+    def test_not_in_any_queue_left_alone_and_logged_once(self):
+        self.sonarr.queue_by_hash.return_value = {}
+        self.run_sweep()
+        self.run_sweep()
+        self.assertEqual(self.removals(), [])
+        self.assertEqual(self.logged(), ["SKIPPING: bad [aa11]; not in Sonarr or Radarr queue"])
+
+    def test_picked_up_once_it_appears_in_a_queue(self):
+        self.sonarr.queue_by_hash.return_value = {}
+        self.run_sweep()
+        self.radarr.queue_by_hash.return_value = {"AA11": {"id": 3}}  # arr polled the client
+        self.run_sweep()
+        self.radarr.blocklist.assert_called_once_with(3)
+        self.assertEqual(self.removed_ids(), [1])
+        self.assertEqual(self.logged()[-1], "REMOVING: bad [aa11]; blocklisting in Radarr")
+        self.assertEqual(reaparr.SKIPPED, set())
+
+    def test_skipped_forgotten_once_torrent_is_gone(self):
+        self.sonarr.queue_by_hash.return_value = {}
+        self.run_sweep()
+        self.torrents[:] = []
+        self.run_sweep()
+        self.assertEqual(reaparr.SKIPPED, set())
 
 
 class MainTest(unittest.TestCase):
-    def run_main(self, argv):
-        with mock.patch("sys.argv", ["reaparr.py"] + argv), \
-                mock.patch("reaparr.sweep") as sweep, \
+    SONARR = ["--sonarr-url", "http://s", "--sonarr-api-key", "K"]
+
+    def run_main(self, argv, arr=True, sweep_error=None):
+        with mock.patch("sys.argv", ["reaparr.py"] + argv + (self.SONARR if arr else [])), \
+                mock.patch("reaparr.sweep", side_effect=sweep_error) as sweep, \
                 mock.patch("reaparr.log"), \
                 mock.patch("reaparr.Transmission") as tm:
             reaparr.main()
@@ -335,9 +376,9 @@ class MainTest(unittest.TestCase):
     def test_once_runs_single_sweep_with_normalised_exts(self):
         sweep, tm = self.run_main(["--once", "--ext", "EXE", ".Iso"])
         sweep.assert_called_once()
-        client, sonarr, exts, delete_data, dry_run = sweep.call_args[0]
+        client, arrs, exts, delete_data, dry_run = sweep.call_args[0]
         self.assertEqual(exts, (".exe", ".iso"))
-        self.assertIsNone(sonarr)
+        self.assertEqual([a.name for a in arrs], ["Sonarr"])
         self.assertTrue(delete_data)
         self.assertFalse(dry_run)
 
@@ -349,25 +390,36 @@ class MainTest(unittest.TestCase):
         sweep, _ = self.run_main(["--once", "--keep-data", "--dry-run"])
         self.assertEqual(sweep.call_args[0][3:], (False, True))
 
-    def test_sonarr_without_key_exits(self):
-        with mock.patch("reaparr.keychain_password", return_value=None), \
-                mock.patch("sys.stdin.isatty", return_value=False):
-            with self.assertRaises(SystemExit):
-                self.run_main(["--once", "--sonarr-url", "http://s"])
+    def test_sonarr_and_radarr(self):
+        sweep, _ = self.run_main(["--once", "--radarr-url", "http://r:7878/", "--radarr-api-key", "R"])
+        arrs = sweep.call_args[0][1]
+        self.assertEqual([(a.name, a.base, a.api_key) for a in arrs],
+                         [("Sonarr", "http://s/api/v3", "K"), ("Radarr", "http://r:7878/api/v3", "R")])
+
+    def test_radarr_key_from_keychain(self):
+        with mock.patch("reaparr.keychain_password", return_value="KC") as kc:
+            sweep, _ = self.run_main(["--once", "--radarr-url", "http://r"], arr=False)
+        kc.assert_called_with("radarr")
+        self.assertEqual(sweep.call_args[0][1][0].api_key, "KC")
+
+    def test_no_arr_exits(self):
+        with self.assertRaisesRegex(SystemExit, "sonarr-url and/or --radarr-url"):
+            self.run_main(["--once"], arr=False)
+
+    def test_arr_without_key_exits(self):
+        for flag in ("--sonarr-url", "--radarr-url"):
+            with mock.patch("reaparr.keychain_password", return_value=None), \
+                    mock.patch("sys.stdin.isatty", return_value=False):
+                with self.assertRaises(SystemExit):
+                    self.run_main(["--once", flag, "http://x"], arr=False)
 
     def test_auth_error_exits_nonzero(self):
-        with mock.patch("sys.argv", ["reaparr.py", "--once"]), \
-                mock.patch("reaparr.sweep", side_effect=reaparr.AuthError("bad")), \
-                mock.patch("reaparr.log"), mock.patch("reaparr.Transmission"):
-            with self.assertRaises(SystemExit) as cm:
-                reaparr.main()
+        with self.assertRaises(SystemExit) as cm:
+            self.run_main(["--once"], sweep_error=reaparr.AuthError("bad"))
         self.assertEqual(cm.exception.code, 1)
 
     def test_transient_error_does_not_exit(self):
-        with mock.patch("sys.argv", ["reaparr.py", "--once"]), \
-                mock.patch("reaparr.sweep", side_effect=RuntimeError("boom")), \
-                mock.patch("reaparr.log"), mock.patch("reaparr.Transmission"):
-            reaparr.main()
+        self.run_main(["--once"], sweep_error=RuntimeError("boom"))
 
 
 if __name__ == "__main__":

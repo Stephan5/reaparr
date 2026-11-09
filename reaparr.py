@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
-"""Watch Transmission and remove torrents containing unwanted file types.
+"""Watch Transmission and remove single-file torrents of unwanted file types
+that Sonarr or Radarr grabbed, blocklisting the release so they search again.
+
+Torrents that neither of them has in its queue are never touched.
 
 Talks to Transmission's RPC API (enable "Remote" in Transmission > Settings >
 Remote, default port 9091). Stdlib only.
 
 Examples:
-    ./reaparr.py --dry-run
-    ./reaparr.py --ext exe iso msi --interval 15
-    ./reaparr.py --port 9092
-    ./reaparr.py --user me --password secret
-    ./reaparr.py --sonarr-url http://localhost:8989
+    ./reaparr.py --sonarr-url http://localhost:8989 --dry-run
+    ./reaparr.py --sonarr-url http://localhost:8989 --radarr-url http://localhost:7878
+    ./reaparr.py --radarr-url http://localhost:7878 --ext exe iso msi --interval 15
+    ./reaparr.py --sonarr-url http://localhost:8989 --user me --password secret
 """
 import argparse
 import base64
@@ -93,8 +95,11 @@ class Transmission:
         raise RuntimeError("could not negotiate Transmission session id")
 
 
-class Sonarr:
-    def __init__(self, url, api_key):
+class Arr:
+    """Sonarr or Radarr: both have the same v3 queue API."""
+
+    def __init__(self, name, url, api_key):
+        self.name = name
         self.base = url.rstrip("/") + "/api/v3"
         self.api_key = api_key
 
@@ -109,12 +114,12 @@ class Sonarr:
                 body = resp.read()
         except urllib.error.HTTPError as e:
             if e.code == 401:
-                raise AuthError("Sonarr rejected the API key")
+                raise AuthError(f"{self.name} rejected the API key")
             raise
         return json.loads(body) if body else None
 
     def queue_by_hash(self):
-        """Map upper-case torrent hash -> Sonarr queue record."""
+        """Map upper-case torrent hash -> queue record."""
         data = self._request("GET", "/queue", {"page": 1, "pageSize": 1000})
         return {r["downloadId"].upper(): r for r in data["records"] if r.get("downloadId")}
 
@@ -122,7 +127,7 @@ class Sonarr:
         """Drop the item from the queue and blocklist the release.
 
         The torrent itself is left to us to remove from Transmission, so
-        --keep-data keeps working. Sonarr searches for a replacement.
+        --keep-data keeps working. Sonarr/Radarr search for a replacement.
         """
         self._request("DELETE", f"/queue/{queue_id}", {
             "removeFromClient": "false",
@@ -135,6 +140,7 @@ class Sonarr:
 # seconds to minutes. Torrents we have asked to remove are tracked here (by hash)
 # until they disappear, rather than being asked again every sweep.
 PENDING = {}  # hash -> {"name", "since" (first request), "sent" (latest request)}
+SKIPPED = set()  # hashes of matching torrents not in any queue, so "SKIPPING" is logged once
 RETRY_AFTER = 300  # seconds before a pending removal is reported and re-sent
 
 CHECKING = (1, 2)  # Transmission status: waiting to verify, verifying
@@ -157,41 +163,59 @@ def log_removed(entry, h, now):
     log(f"REMOVED: {entry['name']} [{h}] after {now - entry['since']:.0f}s")
 
 
-def sweep(client, sonarr, exts, delete_data, dry_run):
+def sweep(client, arrs, exts, delete_data, dry_run):
     torrents = client.call("torrent-get", {"fields": ["id", "name", "hashString", "files", "status"]})["torrents"]
     now = time.monotonic()
     present = {t["hashString"] for t in torrents}
     for h in [h for h in PENDING if h not in present]:
         log_removed(PENDING.pop(h), h, now)
-    queue = None  # fetched lazily, once per sweep
+    SKIPPED.intersection_update(present)
+    queues = {}  # arr name -> queue, fetched lazily, once per sweep
+
+    def queued(t):
+        """(arr, queue record) for the first arr that grabbed this torrent, else (None, None)."""
+        for arr in arrs:
+            if arr.name not in queues:
+                queues[arr.name] = arr.queue_by_hash()
+            record = queues[arr.name].get(t["hashString"].upper())
+            if record:
+                return arr, record
+        return None, None
+
     for t in torrents:
-        hits = bad_files(t, exts)
-        if not hits:
+        if not bad_files(t, exts):
             continue
         if t.get("status") in CHECKING:  # mid-verification; Transmission has ignored removal here
             continue
-        waiting = PENDING.get(t["hashString"])
+        h = t["hashString"]
+        waiting = PENDING.get(h)
         if waiting:
             if now - waiting["sent"] < RETRY_AFTER:
                 continue
-            log(f"error: {t['name']} [{t['hashString']}] still in Transmission "
+            # Already blocklisted, so no longer in the queue: just ask Transmission again.
+            log(f"error: {t['name']} [{h}] still in Transmission "
                 f"{now - waiting['since']:.0f}s after removal was requested "
                 f"(status {t.get('status')}); retrying", file=sys.stderr)
-        record = None
-        if sonarr:
-            if queue is None:
-                queue = sonarr.queue_by_hash()
-            record = queue.get(t["hashString"].upper())
-        via = "; blocklisting in Sonarr" if record else ("; not in Sonarr queue" if sonarr else "")
-        action = "WOULD REMOVE" if dry_run else "REMOVING"
-        log(f"{action}: {t['name']} [{t['hashString']}]{via}")
+            arr = record = None
+        else:
+            arr, record = queued(t)
+            if not record:
+                # Not grabbed by Sonarr/Radarr, or not in their queue yet (they poll
+                # the client periodically); look again next sweep.
+                if h not in SKIPPED:
+                    SKIPPED.add(h)
+                    log(f"SKIPPING: {t['name']} [{h}]; not in {' or '.join(a.name for a in arrs)} queue")
+                continue
+            SKIPPED.discard(h)
+            action = "WOULD REMOVE" if dry_run else "REMOVING"
+            log(f"{action}: {t['name']} [{h}]; blocklisting in {arr.name}")
         if dry_run:
             continue
         if record:
-            sonarr.blocklist(record["id"])
+            arr.blocklist(record["id"])
         client.call("torrent-remove", {"ids": [t["id"]], "delete-local-data": delete_data})
         # "success" only means the request was accepted; the next sweep confirms it.
-        entry = PENDING.setdefault(t["hashString"], {"name": t["name"], "since": now})
+        entry = PENDING.setdefault(h, {"name": t["name"], "since": now})
         entry["sent"] = now
 
 
@@ -204,8 +228,10 @@ def main():
     p.add_argument("--url", help="full RPC URL; overrides --host/--port")
     p.add_argument("--user")
     p.add_argument("--password", help="omit to be prompted when needed")
-    p.add_argument("--sonarr-url", help="e.g. http://localhost:8989; enables Sonarr blocklisting")
+    p.add_argument("--sonarr-url", help="e.g. http://localhost:8989")
     p.add_argument("--sonarr-api-key", help="omit to use Keychain (account 'sonarr', service 'reaparr')")
+    p.add_argument("--radarr-url", help="e.g. http://localhost:7878")
+    p.add_argument("--radarr-api-key", help="omit to use Keychain (account 'radarr', service 'reaparr')")
     p.add_argument("--interval", type=float, default=10, help="seconds between checks (default: 10)")
     p.add_argument("--keep-data", action="store_true", help="remove the torrent but keep downloaded files")
     p.add_argument("--dry-run", action="store_true", help="report matches without removing anything")
@@ -213,22 +239,28 @@ def main():
     args = p.parse_args()
 
     exts = tuple("." + e.lstrip(".").lower() for e in args.ext)
+    arrs = []
+    for name, arr_url, key in [("Sonarr", args.sonarr_url, args.sonarr_api_key),
+                               ("Radarr", args.radarr_url, args.radarr_api_key)]:
+        if not arr_url:
+            continue
+        key = key or keychain_password(name.lower())
+        if not key and sys.stdin.isatty():
+            key = getpass.getpass(f"{name} API key: ")
+        if not key:
+            sys.exit(f"error: --{name.lower()}-url given but no API key "
+                     f"(use --{name.lower()}-api-key or Keychain)")
+        arrs.append(Arr(name, arr_url, key))
+    if not arrs:
+        sys.exit("error: give --sonarr-url and/or --radarr-url; only torrents they grabbed are removed")
     url = args.url or f"http://{args.host}:{args.port}/transmission/rpc"
     client = Transmission(url, args.user, args.password)
-    sonarr = None
-    if args.sonarr_url:
-        key = args.sonarr_api_key or keychain_password("sonarr")
-        if not key and sys.stdin.isatty():
-            key = getpass.getpass("Sonarr API key: ")
-        if not key:
-            sys.exit("error: --sonarr-url given but no API key (use --sonarr-api-key or Keychain)")
-        sonarr = Sonarr(args.sonarr_url, key)
-    log(f"Watching for single-file torrents of {', '.join(exts)} every {args.interval:g}s"
-        f"{' (dry run)' if args.dry_run else ''}{', Sonarr enabled' if sonarr else ''}")
+    log(f"Watching every {args.interval:g}s for single-file torrents grabbed by "
+        f"{' or '.join(a.name for a in arrs)} of {', '.join(exts)}{' (dry run)' if args.dry_run else ''}")
 
     while True:
         try:
-            sweep(client, sonarr, exts, not args.keep_data, args.dry_run)
+            sweep(client, arrs, exts, not args.keep_data, args.dry_run)
         except AuthError as e:
             log(f"error: {e}", file=sys.stderr)
             sys.exit(1)
