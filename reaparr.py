@@ -10,7 +10,7 @@ Remote, default port 9091). Stdlib only.
 Examples:
     ./reaparr.py --sonarr-url http://localhost:8989 --dry-run
     ./reaparr.py --sonarr-url http://localhost:8989 --radarr-url http://localhost:7878
-    ./reaparr.py --radarr-url http://localhost:7878 --ext exe iso msi --interval 15
+    ./reaparr.py --radarr-url http://localhost:7878 --dangerous-ext exe iso msi --archive-ext zip rar
     ./reaparr.py --sonarr-url http://localhost:8989 --user me --password secret
 """
 import argparse
@@ -26,7 +26,11 @@ import urllib.request
 from datetime import datetime
 
 
-DEFAULT_EXTS = ["7z", "arj", "bat", "cmd", "exe", "iso", "lnk", "lzh", "ps1", "scr", "sh", "vbs", "zipx"]
+# Both lists are treated the same; they are kept apart so either can be
+# changed or emptied on its own.
+DANGEROUS_EXTS = ["apk", "bat", "cmd", "com", "dmg", "exe", "hta", "img", "iso", "js", "jse", "lnk", "msi", "pif",
+                  "ps1", "scr", "sh", "vbs", "wsf"]
+ARCHIVE_EXTS = ["7z", "arj", "bz2", "cab", "gz", "lzh", "rar", "tar", "tgz", "xz", "zip", "zipx"]
 
 
 class AuthError(Exception):
@@ -163,7 +167,7 @@ def log_removed(entry, h, now):
     log(f"REMOVED: {entry['name']} [{h}] after {now - entry['since']:.0f}s")
 
 
-def sweep(client, arrs, exts, delete_data, dry_run):
+def sweep(client, arrs, dangerous, delete_data, dry_run, archives=()):
     torrents = client.call("torrent-get", {"fields": ["id", "name", "hashString", "files", "status"]})["torrents"]
     now = time.monotonic()
     present = {t["hashString"] for t in torrents}
@@ -183,7 +187,7 @@ def sweep(client, arrs, exts, delete_data, dry_run):
         return None, None
 
     for t in torrents:
-        if not bad_files(t, exts):
+        if not bad_files(t, dangerous + archives):
             continue
         if t.get("status") in CHECKING:  # mid-verification; Transmission has ignored removal here
             continue
@@ -221,8 +225,10 @@ def sweep(client, arrs, exts, delete_data, dry_run):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--ext", nargs="+", default=DEFAULT_EXTS,
-                   help="extensions to remove when the torrent is a single file (default: %(default)s)")
+    p.add_argument("--dangerous-ext", "--ext", nargs="*", default=DANGEROUS_EXTS,
+                   help="executables, installers, scripts, shortcuts and disk images to remove (default: %(default)s)")
+    p.add_argument("--archive-ext", nargs="*", default=ARCHIVE_EXTS,
+                   help="archives to remove, same rules as --dangerous-ext (default: %(default)s)")
     p.add_argument("--host", default="localhost", help="Transmission host (default: localhost)")
     p.add_argument("--port", type=int, default=9091, help="Transmission RPC port (default: 9091)")
     p.add_argument("--url", help="full RPC URL; overrides --host/--port")
@@ -238,7 +244,10 @@ def main():
     p.add_argument("--once", action="store_true", help="check once and exit")
     args = p.parse_args()
 
-    exts = tuple("." + e.lstrip(".").lower() for e in args.ext)
+    def norm(exts):
+        return tuple("." + e.lstrip(".").lower() for e in exts)
+    dangerous = norm(args.dangerous_ext)
+    archives = tuple(e for e in norm(args.archive_ext) if e not in dangerous)
     arrs = []
     for name, arr_url, key in [("Sonarr", args.sonarr_url, args.sonarr_api_key),
                                ("Radarr", args.radarr_url, args.radarr_api_key)]:
@@ -256,11 +265,12 @@ def main():
     url = args.url or f"http://{args.host}:{args.port}/transmission/rpc"
     client = Transmission(url, args.user, args.password)
     log(f"Watching every {args.interval:g}s for single-file torrents grabbed by "
-        f"{' or '.join(a.name for a in arrs)} of {', '.join(exts)}{' (dry run)' if args.dry_run else ''}")
+        f"{' or '.join(a.name for a in arrs)}; dangerous: {', '.join(dangerous) or 'none'}; "
+        f"archives: {', '.join(archives) or 'none'}{' (dry run)' if args.dry_run else ''}")
 
     while True:
         try:
-            sweep(client, arrs, exts, not args.keep_data, args.dry_run)
+            sweep(client, arrs, dangerous, not args.keep_data, args.dry_run, archives)
         except AuthError as e:
             log(f"error: {e}", file=sys.stderr)
             sys.exit(1)
